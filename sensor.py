@@ -59,6 +59,7 @@ CONF_NOTIFY_PRINCIPLES_SOLAR = 'solar'
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_NOTIFY_TIME,default='09:00:00'): cv.time,
     vol.Optional(CONF_NOTIFY_SCRIPT_NAME, default=''): cv.string,
+    vol.Optional('show_detail',default=True): cv.boolean,
     vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
     vol.Optional(CONF_SOLAR_ANNIVERSARY, default={}): {
         str : [str]
@@ -114,7 +115,8 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
     NOTIFY_PRINCIPLES = config[CONF_NOTIFY_PRINCIPLES]
     script_name = config[CONF_NOTIFY_SCRIPT_NAME]
     notify_time = config[CONF_NOTIFY_TIME]
-    sensors = [ChineseHolidaySensor(hass, name,notify_time,script_name, interval)]
+    show_detail = config['show_detail']
+    sensors = [ChineseHolidaySensor(hass, name,notify_time,script_name, interval,show_detail)]
     add_devices(sensors, True)
 
 
@@ -123,9 +125,10 @@ class ChineseHolidaySensor(Entity):
     _holiday = None
     _lunar = None
 
-    def __init__(self, hass, name,notify_time,script_name, interval):
+    def __init__(self, hass, name,notify_time,script_name, interval,show_detail):
         """Initialize the sensor."""
         self.client_name = name
+        self._show_detail = show_detail
         self._state = None
         self._hass = hass
         self._script_name = script_name
@@ -133,6 +136,7 @@ class ChineseHolidaySensor(Entity):
         self._holiday = holiday.Holiday()
         self._lunar = lunar.CalendarToday()
         self.attributes = {}
+        self.localizedAttributes = {} #汉化的attributes 用来显示
         self.entity_id = generate_entity_id(
             'sensor.{}', self.client_name, hass=self._hass)
         self.update = Throttle(interval)(self._update)
@@ -153,10 +157,14 @@ class ChineseHolidaySensor(Entity):
         """Icon to use in the frontend, if any."""
         return 'mdi:calendar-today'
 
+    # @property
+    # def state_attributes(self):
+    #     return self.attributes
+
     @property
     def device_state_attributes(self):
         """Return the state attributes."""
-        return self.attributes
+        return self.localizedAttributes
 
     #更新为两处，一处为Throttle 默认8小时，此处为第二处 是每天凌晨12:01更新
     def setUpdateListener(self):
@@ -287,14 +295,17 @@ class ChineseHolidaySensor(Entity):
                 t1 = threading.Thread(target=call_service_script,args=(','.join(messages),))
                 t1.start()
 
-    #计算纪念日（每年都有的）
-    def calculate_anniversary(self):
+    #计算纪念日（每年都有的） count 返回n条 默认只返回1条
+    def calculate_anniversary(self,count=1):
         def anniversary_handle(l,age):
+
             l_new = []
             if age != -1: #年龄-1的时候就是没有年份，而且name里得有生日才加这个
                 for name in l:
                     if '生日' in name:
                         l_new.append('%s(%s岁)' % (name,age))
+                    else:
+                        l_new.append('%s(%s周年)' % (name,age))
                 l = l_new;
             return ','.join(l)
         """
@@ -309,7 +320,7 @@ class ChineseHolidaySensor(Entity):
                 year = int(key[:4])
                 month = int(key[4:6])
                 day = int(key[6:])
-                age = lunar.CalendarToday.get_age_by_birth(year,month,day,2) #周岁
+                age = lunar.CalendarToday.get_age_by_birth(year,month,day,2) #周岁          
             else:              
                 month = int(key[:2])
                 day = int(key[2:])
@@ -318,11 +329,11 @@ class ChineseHolidaySensor(Entity):
             solar_date = lunar.CalendarToday.lunar_to_solar(self._lunar.solar()[0],month,day)#下标和位置
             date_str = solar_date.strftime('%Y%m%d')
             try:
-                list = anniversaries[date_str]
+                l = anniversaries[date_str]
             except Exception as e:
                 anniversaries[date_str] = []
-                list = anniversaries[date_str]
-            list.append({'anniversary':anniversary_handle(value,age),'solar':False})
+                l = anniversaries[date_str]
+            l.append({'anniversary':anniversary_handle(value,age),'solar':False})
 
         for key,value in SOLAR_ANNIVERSARY.items():
 
@@ -331,31 +342,34 @@ class ChineseHolidaySensor(Entity):
                 month = int(key[4:6])
                 day = int(key[6:])
                 key = key[4:] #剩下的
-                age = lunar.CalendarToday.get_age_by_birth(year,month,day,2) #周岁
+                age = lunar.CalendarToday.get_age_by_birth(year,month,day,2) #周岁                 
             else:
                 age = -1
             date_str = str(self._lunar.solar()[0])+key #20200101
             try:
-                list = anniversaries[date_str]
+                l = anniversaries[date_str]
             except Exception as e:
                 anniversaries[date_str] = []
-                list = anniversaries[date_str]
-            list.append({'anniversary':anniversary_handle(value,age),'solar':True})
+                l = anniversaries[date_str]
+            l.append({'anniversary':anniversary_handle(value,age),'solar':True})
 
 
     #根据key 排序 因为key就是日期字符串
-        list=sorted(anniversaries.items(),key=lambda x:x[0])
+        l=sorted(anniversaries.items(),key=lambda x:x[0])
         #找到第一个大于今天的纪念日
-        for item in list:
+        cur = 0
+        results = []
+        for item in l:
             key = item[0]
             annis = item[1] #纪念日数组
             now_str = datetime.datetime.now().strftime('%Y-%m-%d')
             today = datetime.datetime.strptime(now_str, "%Y-%m-%d")
             last_update = datetime.datetime.strptime(key,'%Y%m%d')
             days = (last_update - today).days
-            if days > 0:
-                return key,days,annis
-        return None,None,None
+            if days > 0 and cur < count: #只有大于今天的才会显示，今天的会在纪念日中显示
+                cur += 1
+                results.append((key,days,annis))
+        return results
 
     #今天是否是自定义的纪念日（阴历和阳历）
     def custom_anniversary(self):
@@ -389,9 +403,13 @@ class ChineseHolidaySensor(Entity):
                 hour, remainder = divmod(remainder,60*60)
                 minute, second = divmod(remainder,60)
                 self.attributes['calculate_age_past'] = name
+                self.localizedAttributes['过去纪念日'] = name
                 self.attributes['calculate_age_past_date'] = date
+                self.localizedAttributes['过去纪念日日期'] = date
                 self.attributes['calculate_age_past_interval'] = total_seconds
                 self.attributes['calculate_age_past_description'] = '{}年{}天{}小时{}分钟{}秒'.format(year,day,hour,minute,second)
+                self.localizedAttributes['已经过去'] = '{}年{}天{}小时{}分钟{}秒'.format(year,day,hour,minute,second)
+
             if (now_day - key).total_seconds() < 0:
                 total_seconds = int((key - now_day ).total_seconds())
                 year, remainder = divmod(total_seconds,60*60*24*365)
@@ -399,10 +417,12 @@ class ChineseHolidaySensor(Entity):
                 hour, remainder = divmod(remainder,60*60)
                 minute, second = divmod(remainder,60)
                 self.attributes['calculate_age_future'] = name
+                self.localizedAttributes['未来纪念日'] = name
                 self.attributes['calculate_age_future_date'] = date
+                self.localizedAttributes['未来纪念日日期'] = date
                 self.attributes['calculate_age_future_interval'] = total_seconds
                 self.attributes['calculate_age_future_description'] = '{}年{}天{}小时{}分钟{}秒'.format(year,day,hour,minute,second)
-
+                self.localizedAttributes['还有'] = '{}年{}天{}小时{}分钟{}秒'.format(year,day,hour,minute,second)
     def nearest_holiday(self):
         '''查找离今天最近的法定节假日，并显示天数'''
         now_day = datetime.date.today()
@@ -420,39 +440,71 @@ class ChineseHolidaySensor(Entity):
         return nearest_holiday_dict
 
     def _update(self):
-        _LOGGER.info('update')
         self.attributes = {} #重置attributes
         self._lunar = lunar.CalendarToday()#重新赋值
 
         self._state = self._holiday.is_holiday_today()
         self.attributes['solar'] = self._lunar.solar_date_description()
+        self.localizedAttributes['今天'] = self._lunar.solar_date_description()
         # self.attributes['今天'] = datetime.date.today().strftime('%Y{y}%m{m}%d{d}').format(y='年', m='月', d='日')
         self.attributes['week'] = self._lunar.week_description()
+        self.localizedAttributes['星期'] = self._lunar.week_description()
         self.attributes['lunar'] = self._lunar.lunar_date_description()
+        self.localizedAttributes['农历'] = self._lunar.lunar_date_description()
         term = self._lunar.solar_Term()
         if term:
             self.attributes['term'] = term
+            self.localizedAttributes['节气'] = term
         festival = self._lunar.festival_description()
         if festival:
             self.attributes['festival'] = festival
+            self.localizedAttributes['节日'] = festival
 
         custom = self.custom_anniversary()
         if custom:
             self.attributes['anniversary'] = custom
+            self.localizedAttributes['纪念日'] = custom
 
-        key,days,annis = self.calculate_anniversary()
-        s = ''
-        if key and days and annis:
+        #这里传的数字 控制 显示几个 自定义的纪念日
+        results = self.calculate_anniversary(2)
+
+        self.attributes['next_anniversaries'] = []
+        self.localizedAttributes['接下来的纪念日'] = []        
+        #拼接接下来的纪念日
+        for i in range(0,len(results)):
+            key,days,annis = results[i]
+            s = ''
             for anni in annis:
                 s += anni['anniversary']
-            self.attributes['nearest_anniversary'] = s
-            self.attributes['nearest_anniversary_date'] = key
-            self.attributes['nearest_anniversary_days'] = days
+            if i == 0:
+                self.attributes['nearest_anniversary'] = s
+                self.localizedAttributes['最近的纪念日'] = s
+                self.attributes['nearest_anniversary_date'] = key
+                self.localizedAttributes['最近的纪念日日期'] = key
+                self.attributes['nearest_anniversary_days'] = days
+                self.localizedAttributes['最近的纪念日还有'] = str(days) + '天'
+            else:
+                next_anniversaries = self.attributes['next_anniversaries']
+                next_anniversaries.append({'date':key,'name':s,'days':days})
+                next_anniversaries_local = self.localizedAttributes['接下来的纪念日']
+                next_anniversaries_local.append('距离纪念日 %s-%s 还有 %s 天 ' % (s,key,days))                
 
         nearest = self.nearest_holiday()
         if nearest:
             self.attributes['nearest_holiday'] = nearest['name']
+            self.localizedAttributes['最近的节日'] = nearest['name']          
             self.attributes['nearest_holiday_date'] = nearest['date']
+            self.localizedAttributes['最近的节日日期'] = nearest['date']
             self.attributes['nearest_holiday_days'] = int(nearest['day'])
-
+            self.localizedAttributes['最近的节日还有'] = str(nearest['day']) + '天'
         self.calculate_age()
+
+        info = self._holiday.nearest_holiday_info(12,45)
+        if info:
+            self.attributes['holiday_info'] = info
+            self.localizedAttributes['节假日放假详情'] = info
+
+        if self._show_detail:
+            self.localizedAttributes['data'] = self.attributes
+
+   
